@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.ai_utils import generate_narrative, get_provider_status, load_env_file, normalize_provider
 from src.data_utils import (
@@ -16,6 +18,7 @@ from src.data_utils import (
     normalize_achievements,
     read_achievement_csv,
 )
+from src.html_preview_utils import render_deck_preview_html, render_slide_preview_html
 from src.metrics_utils import (
     append_report_history,
     build_filter_trace,
@@ -26,6 +29,16 @@ from src.metrics_utils import (
     trace_signature,
 )
 from src.ppt_utils import FIXED_TEMPLATE_SLIDES, TEMPLATE_VERSION, generate_achievement_ppt
+from src.slide_chat_utils import propose_slide_patch
+from src.slide_spec_utils import (
+    DATA_SOURCE_FIELDS,
+    STYLE_PRESETS,
+    apply_slide_patch,
+    build_default_slide_spec,
+    get_slide,
+    slide_spec_signature,
+    sync_slide_spec_context,
+)
 
 APP_DIR = Path(__file__).parent
 SAMPLE_CSV = APP_DIR / "sample_data" / "2026-CDO China Achievements sample.csv"
@@ -41,7 +54,7 @@ st.set_page_config(
 )
 
 st.title("DeptFlow Achievement Reporter")
-st.caption("Streamlit MVP · Filter achievements · Preview metrics · Generate fixed-template PPT")
+st.caption("Filter achievements · Preview editable slide draft in HTML · Generate fixed-template PPTX")
 
 with st.sidebar:
     st.header("1. Data Source")
@@ -121,25 +134,44 @@ filter_trace = build_filter_trace(
     impact_levels=impact_levels,
 )
 
-narrative_signature = f"{trace_signature(filter_trace, metrics)}|report_title={report_title}"
-if st.session_state.get("narrative_signature") != narrative_signature:
-    result = generate_narrative(
-        metrics=metrics,
-        period_label=period_label,
-        provider="rule_based",
+default_result = generate_narrative(
+    metrics=metrics,
+    period_label=period_label,
+    provider="rule_based",
+    report_title=report_title,
+    env_path=ENV_PATH,
+)
+context_signature = f"{trace_signature(filter_trace, metrics)}|report_title={report_title}"
+
+if st.session_state.get("slide_context_signature") != context_signature:
+    style_preset = st.session_state.get("slide_spec", {}).get("style_preset", os.getenv("SLIDE_STYLE_PRESET", "atlas"))
+    st.session_state["slide_spec"] = build_default_slide_spec(
+        metrics,
+        filtered,
         report_title=report_title,
-        env_path=ENV_PATH,
+        period_label=period_label,
+        narrative_text=default_result.text,
+        style_preset=style_preset,
     )
-    st.session_state["narrative_text"] = result.text
-    st.session_state["narrative_provider"] = result.provider
-    st.session_state["narrative_model"] = result.model
-    st.session_state["narrative_warning"] = result.warning
-    st.session_state["narrative_signature"] = narrative_signature
-    st.session_state.pop("ppt_bytes", None)
-    st.session_state.pop("ppt_generated_at", None)
-    st.session_state.pop("ppt_file_name", None)
-    st.session_state.pop("ppt_signature", None)
-    st.session_state.pop("ppt_narrative_text", None)
+    st.session_state["slide_context_signature"] = context_signature
+    st.session_state["narrative_provider"] = default_result.provider
+    st.session_state["narrative_model"] = default_result.model
+    st.session_state["narrative_warning"] = default_result.warning
+    for key in ["ppt_bytes", "ppt_generated_at", "ppt_file_name", "ppt_signature", "pending_slide_patch", "pending_slide_patch_warning"]:
+        st.session_state.pop(key, None)
+else:
+    st.session_state["slide_spec"] = sync_slide_spec_context(
+        st.session_state["slide_spec"],
+        report_title=report_title,
+        period_label=period_label,
+        default_narrative=default_result.text,
+    )
+
+slide_spec = st.session_state["slide_spec"]
+data_context = {
+    "filtered_df": filtered,
+    "metrics": metrics,
+}
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 kpi1.metric("Achievements", summary["total_achievements"])
@@ -149,11 +181,11 @@ kpi4.metric("CF-related Count", summary["cf_total"])
 
 st.divider()
 
-tab_overview, tab_detail, tab_people, tab_ai, tab_report = st.tabs([
+tab_overview, tab_detail, tab_people, tab_studio, tab_report = st.tabs([
     "Overview Dashboard",
     "Achievement Review Table",
     "People View",
-    "AI Narrative Assistant",
+    "AI Slide Studio",
     "PPT Builder",
 ])
 
@@ -183,7 +215,7 @@ with tab_overview:
 
 with tab_detail:
     st.subheader("Achievement Review Table")
-    st.caption("This table is the human-review layer before formal PPT generation. In a later version, LM Confirmed / Reportable Flag can be edited here.")
+    st.caption("This table is the human-review layer before formal PPT generation.")
     display_cols = [col for col in PRESENTATION_COLUMNS if col in filtered.columns]
     view = filtered[display_cols].copy()
     view = view.rename(columns={
@@ -209,9 +241,9 @@ with tab_people:
     if not people_df.empty:
         st.plotly_chart(px.bar(people_df.head(10), x="achievement_count", y="person_name", orientation="h"), use_container_width=True)
 
-with tab_ai:
-    st.subheader("AI Narrative Assistant")
-    st.caption("AI only drafts editable text. It receives application-calculated metrics, not raw authority to change data.")
+with tab_studio:
+    st.subheader("AI Slide Studio")
+    st.caption("HTML is a preview layer only. Confirmed PPTX is rebuilt as editable PowerPoint objects from the same SlideSpec.")
 
     provider_status = get_provider_status(ENV_PATH)
     provider_codes = ["rule_based", "openai", "gemini"]
@@ -223,57 +255,148 @@ with tab_ai:
         availability = "available" if status["available"] else "no API key"
         return f"{status['label']} ({availability})"
 
-    selected_provider = st.selectbox(
-        "Narrative provider",
-        provider_codes,
-        index=default_index,
-        format_func=_provider_label,
-    )
+    control_col, preview_col = st.columns([0.9, 1.3], gap="large")
 
-    if st.button("Generate narrative from calculated metrics", type="primary"):
-        result = generate_narrative(
-            metrics=metrics,
-            period_label=period_label,
-            provider=selected_provider,
-            report_title=report_title,
-            env_path=ENV_PATH,
+    with control_col:
+        selected_provider = st.selectbox(
+            "AI provider",
+            provider_codes,
+            index=default_index,
+            format_func=_provider_label,
         )
-        st.session_state["narrative_text"] = result.text
-        st.session_state["narrative_provider"] = result.provider
-        st.session_state["narrative_model"] = result.model
-        st.session_state["narrative_warning"] = result.warning
 
-    st.text_area("Editable narrative used in PPT", key="narrative_text", height=220)
+        style_options = list(STYLE_PRESETS)
+        current_style = slide_spec.get("style_preset", "atlas")
+        next_style = st.selectbox(
+            "Deck style preset",
+            style_options,
+            index=style_options.index(current_style) if current_style in style_options else 0,
+            format_func=lambda code: STYLE_PRESETS[code]["label"],
+        )
+        if next_style != slide_spec.get("style_preset"):
+            slide_spec["style_preset"] = next_style
+            st.session_state["slide_spec"] = slide_spec
+            st.session_state.pop("ppt_bytes", None)
 
-    current_provider = st.session_state.get("narrative_provider", "rule_based")
-    current_model = st.session_state.get("narrative_model", "rules-v1")
-    st.caption(f"Current narrative source: {current_provider} / {current_model}")
-    if st.session_state.get("narrative_warning"):
-        st.warning(st.session_state["narrative_warning"])
+        slide_options = {int(slide["id"]): f"{slide['id']}. {slide['title']}" for slide in slide_spec["slides"]}
+        selected_slide_id = st.selectbox("Preview / edit slide", list(slide_options), format_func=lambda slide_id: slide_options[slide_id])
+        selected_slide = get_slide(slide_spec, selected_slide_id)
 
-    with st.expander("Calculated metrics sent to AI"):
-        st.json(compact_metrics_for_ai(metrics))
+        st.markdown("**Current Slide Controls**")
+        selected_slide["title"] = st.text_input("Slide title", value=selected_slide.get("title", ""), key=f"title_{selected_slide_id}")
+        selected_slide["layout_variant"] = st.selectbox(
+            "Layout variant",
+            ["hero", "split", "dashboard", "chart_table", "table_full", "table_chart", "cards_table"],
+            index=["hero", "split", "dashboard", "chart_table", "table_full", "table_chart", "cards_table"].index(selected_slide.get("layout_variant", "table_full")),
+            key=f"layout_{selected_slide_id}",
+        )
+        selected_slide["chart_type"] = st.selectbox(
+            "Chart type",
+            ["none", "bar", "column"],
+            index=["none", "bar", "column"].index(selected_slide.get("chart_type", "none")),
+            key=f"chart_{selected_slide_id}",
+        )
+        selected_slide["top_n"] = st.number_input("Top N rows/items", min_value=1, max_value=25, value=int(selected_slide.get("top_n", 8)), step=1, key=f"topn_{selected_slide_id}")
+        data_source = st.selectbox(
+            "Data source",
+            list(DATA_SOURCE_FIELDS),
+            index=list(DATA_SOURCE_FIELDS).index(selected_slide.get("data_source", "none")),
+            key=f"datasource_{selected_slide_id}",
+        )
+        selected_slide["data_source"] = data_source
+        field_options = DATA_SOURCE_FIELDS.get(data_source, [])
+        selected_slide["fields"] = st.multiselect(
+            "Fields shown",
+            field_options,
+            default=[field for field in selected_slide.get("fields", []) if field in field_options],
+            key=f"fields_{selected_slide_id}",
+        )
+        if selected_slide_id == 2:
+            selected_slide["narrative"] = st.text_area("Editable executive summary", value=selected_slide.get("narrative", ""), height=170)
+
+        st.session_state["slide_spec"] = slide_spec
+
+        st.markdown("**Ask AI to adjust the draft**")
+        user_message = st.text_area(
+            "Request",
+            placeholder="Example: slide 5 only show top 5 Study ID rows and include TA, High Impact, CF Total. Use a cleaner table layout.",
+            height=120,
+        )
+        if st.button("Generate controlled patch", type="primary"):
+            result = propose_slide_patch(
+                user_message=user_message,
+                slide_spec=slide_spec,
+                metrics=metrics,
+                provider=selected_provider,
+                env_path=ENV_PATH,
+            )
+            st.session_state["pending_slide_patch"] = result.patch
+            st.session_state["pending_slide_patch_warning"] = result.warning
+            st.session_state["narrative_provider"] = result.provider
+            st.session_state["narrative_model"] = result.model
+
+        if st.session_state.get("pending_slide_patch_warning"):
+            st.warning(st.session_state["pending_slide_patch_warning"])
+        if st.session_state.get("pending_slide_patch"):
+            st.json(st.session_state["pending_slide_patch"])
+            apply_col, discard_col = st.columns(2)
+            with apply_col:
+                if st.button("Apply patch"):
+                    try:
+                        st.session_state["slide_spec"] = apply_slide_patch(slide_spec, st.session_state["pending_slide_patch"])
+                        st.session_state.pop("pending_slide_patch", None)
+                        st.session_state.pop("pending_slide_patch_warning", None)
+                        st.session_state.pop("ppt_bytes", None)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Patch rejected: {exc}")
+            with discard_col:
+                if st.button("Discard patch"):
+                    st.session_state.pop("pending_slide_patch", None)
+                    st.session_state.pop("pending_slide_patch_warning", None)
+                    st.rerun()
+
+        with st.expander("Current SlideSpec JSON"):
+            st.code(json.dumps(slide_spec, ensure_ascii=False, indent=2), language="json")
+
+        with st.expander("Calculated metrics available to AI"):
+            st.json(compact_metrics_for_ai(metrics))
+
+    with preview_col:
+        st.markdown("**HTML Slide Preview**")
+        view_mode = st.radio("Preview mode", ["Selected slide", "Full deck thumbnails"], horizontal=True)
+        if view_mode == "Selected slide":
+            components.html(render_slide_preview_html(slide_spec, selected_slide_id, data_context), height=620, scrolling=False)
+        else:
+            components.html(render_deck_preview_html(slide_spec, data_context), height=1100, scrolling=True)
 
 with tab_report:
     st.subheader("PPT Builder")
-    st.caption("Fixed-template PPTX uses filtered achievement data only and the editable narrative from the AI tab.")
+    st.caption("PPTX uses the current SlideSpec and filtered data. HTML preview is not screenshot into PPT.")
 
     slide_plan = pd.DataFrame(FIXED_TEMPLATE_SLIDES)
     st.dataframe(slide_plan, use_container_width=True, hide_index=True)
+
+    current_slide_signature = slide_spec_signature(st.session_state["slide_spec"])
+    build_signature = f"{context_signature}|slide_spec={current_slide_signature}"
 
     with st.expander("Traceability metadata for this build"):
         st.json({
             "template_version": TEMPLATE_VERSION,
             "ai_provider": st.session_state.get("narrative_provider", "rule_based"),
             "ai_model": st.session_state.get("narrative_model", "rules-v1"),
+            "style_preset": st.session_state["slide_spec"].get("style_preset", "atlas"),
             "filters": filter_trace,
         })
 
-    if st.button("Build PPTX from current filters and narrative", type="primary"):
+    components.html(render_slide_preview_html(st.session_state["slide_spec"], 1, data_context), height=540, scrolling=False)
+
+    if st.button("Build editable PPTX from current SlideSpec", type="primary"):
         generated_at = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
         ai_provider = st.session_state.get("narrative_provider", "rule_based")
         ai_model = st.session_state.get("narrative_model", "rules-v1")
-        narrative_text = st.session_state.get("narrative_text", "")
+        slide_2 = get_slide(st.session_state["slide_spec"], 2)
+        narrative_text = slide_2.get("narrative", "")
 
         ppt_bytes = generate_achievement_ppt(
             filtered,
@@ -285,6 +408,7 @@ with tab_report:
             generated_at=generated_at,
             filters=filter_trace,
             metrics=metrics,
+            slide_spec=st.session_state["slide_spec"],
         )
         history_record = build_report_history_record(
             generated_at=generated_at,
@@ -298,21 +422,20 @@ with tab_report:
             filter_trace=filter_trace,
             metrics=metrics,
             narrative_text=narrative_text,
+            slide_spec=st.session_state["slide_spec"],
+            style_preset=st.session_state["slide_spec"].get("style_preset", "atlas"),
+            preview_generated=True,
+            preview_renderer="html",
         )
         append_report_history(REPORT_HISTORY_CSV, history_record)
 
         st.session_state["ppt_bytes"] = ppt_bytes
         st.session_state["ppt_generated_at"] = generated_at
         st.session_state["ppt_file_name"] = "deptflow_achievement_report.pptx"
-        st.session_state["ppt_signature"] = narrative_signature
-        st.session_state["ppt_narrative_text"] = narrative_text
+        st.session_state["ppt_signature"] = build_signature
         st.success(f"PPTX built and history recorded at {generated_at}.")
 
-    ppt_is_current = (
-        st.session_state.get("ppt_bytes")
-        and st.session_state.get("ppt_signature") == narrative_signature
-        and st.session_state.get("ppt_narrative_text") == st.session_state.get("narrative_text", "")
-    )
+    ppt_is_current = st.session_state.get("ppt_bytes") and st.session_state.get("ppt_signature") == build_signature
     if ppt_is_current:
         st.download_button(
             "Download PPTX",
@@ -321,7 +444,7 @@ with tab_report:
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
     elif st.session_state.get("ppt_bytes"):
-        st.warning("The existing PPTX build is stale because filters, title, or narrative changed. Rebuild before downloading.")
+        st.warning("The existing PPTX build is stale because filters, title, or SlideSpec changed. Rebuild before downloading.")
     else:
         st.info("Build the PPTX first, then download it.")
 

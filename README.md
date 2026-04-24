@@ -18,7 +18,7 @@ This demo turns a SharePoint-exported achievement CSV into a filterable dashboar
 - Shows dashboard metrics and charts.
 - Builds a review table for human validation.
 - Generates an 8-slide fixed-template PPTX report from filtered data only.
-- Includes an editable AI Narrative Assistant with rule-based fallback.
+- Includes an AI Slide Studio with HTML/CSS slide preview and controlled AI patches.
 - Records report generation traceability in `outputs/report_history.csv`.
 
 ## Folder structure
@@ -32,6 +32,9 @@ This demo turns a SharePoint-exported achievement CSV into a filterable dashboar
     data_utils.py
     metrics_utils.py
     ai_utils.py
+    slide_spec_utils.py
+    slide_chat_utils.py
+    html_preview_utils.py
     ppt_utils.py
   /sample_data
     local CSV exports, ignored by Git
@@ -68,6 +71,23 @@ AI narrative generation is optional:
 - `AI_PROVIDER=gemini` uses Gemini only when `GEMINI_API_KEY` is present.
 
 AI output is editable narrative text only. Counts, filters, and PPT tables/charts are calculated by the application from the filtered source data.
+
+## HTML preview and PPT output
+
+The app previews slides as HTML/CSS inside Streamlit. This preview is not converted into images. When you build the report, the app uses the same `SlideSpec` plus filtered data to generate a real editable `.pptx` file with PowerPoint text, tables, charts, and shapes.
+
+The fixed deck keeps 8 slides:
+
+1. Title Page
+2. Executive Summary
+3. Achievement Overview Dashboard
+4. Activity Type Breakdown
+5. Project / Study Highlights
+6. People Contribution View
+7. Quality / Complexity Highlights
+8. Appendix Detail Table
+
+AI Slide Studio can propose controlled JSON patches for slide text, fields, top-N limits, chart type, layout variant, and style preset. The user must apply the patch before it changes the preview or final PPT.
 
 ## Recommended next step
 

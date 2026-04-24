@@ -21,6 +21,10 @@ REPORT_HISTORY_COLUMNS = [
     "period_label",
     "filter_json",
     "metrics_json",
+    "slide_spec_json",
+    "style_preset",
+    "preview_generated",
+    "preview_renderer",
     "narrative_chars",
 ]
 
@@ -222,6 +226,10 @@ def build_report_history_record(
     filter_trace: dict[str, Any],
     metrics: dict[str, Any],
     narrative_text: str,
+    slide_spec: dict[str, Any] | None = None,
+    style_preset: str = "",
+    preview_generated: bool = False,
+    preview_renderer: str = "html",
 ) -> dict[str, Any]:
     return {
         "generated_at": generated_at,
@@ -234,6 +242,10 @@ def build_report_history_record(
         "period_label": period_label,
         "filter_json": json.dumps(filter_trace, ensure_ascii=False, sort_keys=True, default=str),
         "metrics_json": json.dumps(compact_metrics_for_ai(metrics), ensure_ascii=False, sort_keys=True, default=str),
+        "slide_spec_json": json.dumps(slide_spec or {}, ensure_ascii=False, sort_keys=True, default=str),
+        "style_preset": style_preset,
+        "preview_generated": bool(preview_generated),
+        "preview_renderer": preview_renderer,
         "narrative_chars": len(narrative_text or ""),
     }
 
@@ -241,6 +253,15 @@ def build_report_history_record(
 def append_report_history(history_path: str | Path, record: dict[str, Any]) -> None:
     path = Path(history_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 0:
+        existing = pd.read_csv(path)
+        if list(existing.columns) != REPORT_HISTORY_COLUMNS:
+            for col in REPORT_HISTORY_COLUMNS:
+                if col not in existing.columns:
+                    existing[col] = ""
+            existing = existing[REPORT_HISTORY_COLUMNS]
+            existing.to_csv(path, index=False, encoding="utf-8-sig")
+
     write_header = not path.exists() or path.stat().st_size == 0
 
     with path.open("a", newline="", encoding="utf-8-sig") as f:
