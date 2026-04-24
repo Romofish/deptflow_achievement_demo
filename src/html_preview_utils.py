@@ -17,7 +17,7 @@ def _truncate(value: Any, max_chars: int = 96) -> str:
     return text if len(text) <= max_chars else text[: max_chars - 1] + "..."
 
 
-def _metric_cards(metrics: dict[str, Any]) -> str:
+def _metric_cards(metrics: dict[str, Any], limit: int | None = None) -> str:
     summary = metrics.get("summary", {})
     quality = metrics.get("quality_complexity", {})
     cards = [
@@ -28,6 +28,8 @@ def _metric_cards(metrics: dict[str, Any]) -> str:
         ("High Impact", quality.get("high_impact_count", 0)),
         ("Quality / Inspection", quality.get("quality_inspection_count", 0)),
     ]
+    if limit:
+        cards = cards[:limit]
     return "".join(f"<div class='metric'><b>{_esc(value)}</b><span>{_esc(label)}</span></div>" for label, value in cards)
 
 
@@ -52,7 +54,8 @@ def _chart_html(df: pd.DataFrame, chart_type: str) -> str:
     max_value = max(float(values.max()), 1.0)
     bars = []
     for idx, (_, row) in enumerate(df.iterrows()):
-        value = float(pd.to_numeric(row[value_col], errors="coerce") or 0)
+        raw_value = pd.to_numeric(row[value_col], errors="coerce")
+        value = 0.0 if pd.isna(raw_value) else float(raw_value)
         width = max(4, int((value / max_value) * 100))
         if chart_type == "column":
             bars.append(
@@ -75,23 +78,24 @@ def _slide_body(slide: dict[str, Any], df: pd.DataFrame, metrics: dict[str, Any]
     kind = slide.get("kind")
     table_df = get_data_frame_for_slide(slide, df, metrics)
     chart_type = slide.get("chart_type", "none")
+    layout = slide.get("layout_variant", "table_full")
 
     if kind == "title":
         return (
             "<section class='hero-grid'>"
             f"<div class='hero-copy'><p>{_esc(slide.get('narrative', ''))}</p>"
             "<p class='muted'>Template locked to 8 editable slides. Data comes from current filters.</p></div>"
-            f"<div class='metric-grid'>{_metric_cards(metrics)}</div>"
+            f"<div class='metric-grid'>{_metric_cards(metrics, limit=4)}</div>"
             "</section>"
         )
     if kind == "narrative":
         return (
             "<section class='split-grid'>"
             f"<div class='narrative'>{_esc(slide.get('narrative', '')).replace(chr(10), '<br><br>')}</div>"
-            f"<div class='metric-stack'>{_metric_cards(metrics)}</div>"
+            f"<div class='metric-stack'>{_metric_cards(metrics, limit=4)}</div>"
             "</section>"
         )
-    if kind == "dashboard":
+    if layout == "dashboard" or kind == "dashboard":
         return (
             "<section class='dashboard-grid'>"
             f"<div class='metric-grid wide'>{_metric_cards(metrics)}</div>"
@@ -99,18 +103,39 @@ def _slide_body(slide: dict[str, Any], df: pd.DataFrame, metrics: dict[str, Any]
             f"<div class='panel'>{_chart_html(pd.DataFrame(metrics.get('impact_breakdown', {}).items(), columns=['Impact', 'Count']), 'column')}</div>"
             "</section>"
         )
-    if slide.get("layout_variant") in {"chart_table", "table_chart"} and chart_type != "none":
+    if layout == "chart_table" and chart_type != "none":
         return (
             "<section class='chart-table-grid'>"
             f"<div class='panel chart-panel'>{_chart_html(table_df, chart_type)}</div>"
             f"<div class='panel table-panel'>{_table_html(table_df, compact=True)}</div>"
             "</section>"
         )
-    if kind == "quality":
+    if layout == "table_chart" and chart_type != "none":
+        return (
+            "<section class='table-chart-grid'>"
+            f"<div class='panel table-panel'>{_table_html(table_df, compact=True)}</div>"
+            f"<div class='panel chart-panel'>{_chart_html(table_df, chart_type)}</div>"
+            "</section>"
+        )
+    if layout == "split":
+        return (
+            "<section class='split-grid'>"
+            f"<div class='panel table-panel'>{_table_html(table_df, compact=True)}</div>"
+            f"<div class='panel chart-panel'>{_chart_html(table_df, chart_type) if chart_type != 'none' else _metric_cards(metrics, limit=4)}</div>"
+            "</section>"
+        )
+    if layout == "cards_table" or kind == "quality":
         return (
             "<section class='quality-grid'>"
-            f"<div class='metric-grid'>{_metric_cards(metrics)}</div>"
+            f"<div class='metric-grid wide'>{_metric_cards(metrics)}</div>"
             f"<div class='panel table-wide'>{_table_html(table_df, compact=True)}</div>"
+            "</section>"
+        )
+    if layout == "hero":
+        return (
+            "<section class='hero-grid'>"
+            f"<div class='hero-copy'><p>{_esc(slide.get('narrative') or slide.get('title', ''))}</p><p class='muted'>{_esc(slide.get('data_source', ''))}</p></div>"
+            f"<div class='panel table-panel'>{_table_html(table_df, compact=True)}</div>"
             "</section>"
         )
     return f"<section class='panel table-wide'>{_table_html(table_df, compact=True)}</section>"
@@ -132,6 +157,7 @@ def _style_block(style_preset: str) -> str:
       * {{ box-sizing: border-box; }}
       body {{ margin: 0; background: #d9dee7; font-family: 'Aptos Display', 'Segoe UI', sans-serif; }}
       .deck-preview {{ display: grid; gap: 18px; padding: 10px; }}
+      .deck-preview.single .slide {{ width: min(100%, 1060px); margin: 0 auto; }}
       .slide {{
         width: 100%;
         aspect-ratio: 16 / 9;
@@ -143,7 +169,7 @@ def _style_block(style_preset: str) -> str:
         overflow: hidden;
         position: relative;
         box-shadow: 0 22px 70px rgba(17, 24, 39, .18);
-        padding: 4.2% 4.6% 3.4%;
+        padding: 3.7% 4.4% 3.3%;
       }}
       .slide::before {{
         content: "";
@@ -156,23 +182,24 @@ def _style_block(style_preset: str) -> str:
       h1 {{ margin: 0; font-size: clamp(22px, 3vw, 43px); letter-spacing: -.04em; line-height: .96; }}
       .subtitle {{ color: var(--muted); font-size: clamp(10px, 1vw, 15px); margin-top: 8px; }}
       .chip {{ border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 999px; padding: 8px 12px; color: var(--accent); font-size: 12px; white-space: nowrap; background: color-mix(in srgb, var(--surface) 78%, transparent); }}
-      .hero-grid, .split-grid, .dashboard-grid, .chart-table-grid, .quality-grid {{ display: grid; gap: 22px; height: 78%; }}
+      .hero-grid, .split-grid, .dashboard-grid, .chart-table-grid, .table-chart-grid, .quality-grid {{ display: grid; gap: 18px; height: 77%; }}
       .hero-grid {{ grid-template-columns: 1.05fr 1.2fr; align-items: end; }}
       .split-grid {{ grid-template-columns: 1.35fr .85fr; }}
       .dashboard-grid {{ grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr; }}
       .dashboard-grid .wide {{ grid-column: 1 / -1; }}
       .chart-table-grid {{ grid-template-columns: 1.2fr .9fr; }}
+      .table-chart-grid {{ grid-template-columns: .95fr 1.1fr; }}
       .quality-grid {{ grid-template-rows: auto 1fr; }}
       .hero-copy p {{ font-size: clamp(16px, 1.7vw, 27px); line-height: 1.14; margin: 0 0 16px; max-width: 700px; }}
       .muted, .empty {{ color: var(--muted); }}
-      .narrative {{ font-size: clamp(13px, 1.45vw, 23px); line-height: 1.38; background: color-mix(in srgb, var(--surface) 78%, transparent); border: 1px solid rgba(100,100,100,.12); border-radius: 22px; padding: 24px; }}
-      .panel {{ background: color-mix(in srgb, var(--surface) 86%, transparent); border: 1px solid rgba(100,100,100,.13); border-radius: 22px; padding: 18px; overflow: hidden; min-height: 0; }}
-      .metric-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
+      .narrative {{ font-size: clamp(12px, 1.18vw, 19px); line-height: 1.34; background: color-mix(in srgb, var(--surface) 78%, transparent); border: 1px solid rgba(100,100,100,.12); border-radius: 22px; padding: 22px; overflow: hidden; }}
+      .panel {{ background: color-mix(in srgb, var(--surface) 86%, transparent); border: 1px solid rgba(100,100,100,.13); border-radius: 22px; padding: 16px; overflow: hidden; min-height: 0; }}
+      .metric-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }}
       .metric-grid.wide {{ grid-template-columns: repeat(6, minmax(0, 1fr)); }}
-      .metric-stack {{ display: grid; gap: 13px; }}
-      .metric {{ border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 18px; padding: 15px; background: color-mix(in srgb, var(--surface) 82%, transparent); }}
-      .metric b {{ display: block; font-size: clamp(21px, 2.4vw, 34px); color: var(--accent); line-height: .9; }}
-      .metric span {{ display: block; margin-top: 9px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }}
+      .metric-stack {{ display: grid; gap: 10px; align-content: start; }}
+      .metric {{ border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 16px; padding: 12px; background: color-mix(in srgb, var(--surface) 82%, transparent); }}
+      .metric b {{ display: block; font-size: clamp(19px, 2vw, 30px); color: var(--accent); line-height: .9; }}
+      .metric span {{ display: block; margin-top: 7px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }}
       table {{ width: 100%; border-collapse: collapse; font-size: clamp(8px, .9vw, 13px); }}
       th {{ background: var(--ink); color: var(--surface); text-align: left; padding: 9px 10px; font-size: .9em; }}
       td {{ padding: 8px 10px; border-bottom: 1px solid rgba(90,90,90,.12); vertical-align: top; }}
@@ -185,7 +212,7 @@ def _style_block(style_preset: str) -> str:
       .colbar {{ flex: 1; min-height: 8%; border-radius: 14px 14px 4px 4px; background: linear-gradient(180deg, var(--accent-3), var(--accent)); display: flex; align-items: start; justify-content: center; color: white; font-size: 11px; padding-top: 7px; }}
       .column-labels {{ display: flex; gap: 16px; color: var(--muted); font-size: 10px; justify-content: center; }}
       .column-labels span {{ flex: 1; text-align: center; }}
-      .slide-footer {{ position: absolute; left: 4.6%; right: 4.6%; bottom: 2.2%; color: var(--muted); font-size: 10px; display: flex; justify-content: space-between; }}
+      .slide-footer {{ position: absolute; left: 4.6%; right: 4.6%; bottom: 2.1%; color: var(--muted); font-size: 9px; display: flex; justify-content: space-between; }}
       .thumb-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }}
       .thumb-grid .slide {{ border-radius: 14px; padding: 4%; }}
     </style>
@@ -200,7 +227,7 @@ def render_slide_preview_html(slide_spec: dict[str, Any], slide_id: int, data_co
     body = _slide_body(slide, df, metrics)
     return f"""
     {_style_block(style_preset)}
-    <div class="deck-preview">
+    <div class="deck-preview single">
       <article class="slide">
         <header class="slide-header">
           <div>

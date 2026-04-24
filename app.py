@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import os
 from pathlib import Path
 
@@ -24,7 +23,6 @@ from src.metrics_utils import (
     build_filter_trace,
     build_report_history_record,
     calculate_report_metrics,
-    compact_metrics_for_ai,
     load_report_history,
     trace_signature,
 )
@@ -46,6 +44,19 @@ ENV_PATH = APP_DIR / ".env"
 REPORT_HISTORY_CSV = APP_DIR / "outputs" / "report_history.csv"
 
 load_env_file(ENV_PATH)
+
+
+def _describe_patch(patch: dict) -> pd.DataFrame:
+    rows = []
+    if patch.get("style_preset"):
+        rows.append({"Scope": "Deck", "Change": "Style preset", "Value": patch["style_preset"]})
+    for slide_change in patch.get("slides", []):
+        slide_id = slide_change.get("id", "")
+        for key, value in slide_change.items():
+            if key == "id":
+                continue
+            rows.append({"Scope": f"Slide {slide_id}", "Change": key, "Value": str(value)})
+    return pd.DataFrame(rows, columns=["Scope", "Change", "Value"])
 
 st.set_page_config(
     page_title="DeptFlow Achievement Reporter",
@@ -168,6 +179,9 @@ else:
     )
 
 slide_spec = st.session_state["slide_spec"]
+if "preview_slide_id" not in st.session_state:
+    st.session_state["preview_slide_id"] = 1
+st.session_state["preview_slide_id"] = max(1, min(8, int(st.session_state["preview_slide_id"])))
 data_context = {
     "filtered_df": filtered,
     "metrics": metrics,
@@ -213,6 +227,17 @@ with tab_overview:
     else:
         st.info("No monthly trend available.")
 
+    with st.expander("Data quality checks"):
+        checks = pd.DataFrame([
+            {"Check": "Rows loaded", "Value": len(df)},
+            {"Check": "Rows after filters", "Value": len(filtered)},
+            {"Check": "Missing delivery date", "Value": int(df["delivery_date"].isna().sum())},
+            {"Check": "Missing Study ID", "Value": int(df["study_id"].eq("").sum())},
+            {"Check": "Missing comments", "Value": int(df["comments"].eq("").sum())},
+            {"Check": "Missing submitted by", "Value": int(df["submitted_by"].eq("").sum())},
+        ])
+        st.dataframe(checks, use_container_width=True, hide_index=True)
+
 with tab_detail:
     st.subheader("Achievement Review Table")
     st.caption("This table is the human-review layer before formal PPT generation.")
@@ -237,7 +262,13 @@ with tab_detail:
 with tab_people:
     st.subheader("People Contribution View")
     people_df = build_people_summary(filtered)
-    st.dataframe(people_df, use_container_width=True, hide_index=True)
+    st.caption("Main activity is the most frequent activity type for each person within the current filtered data. If tied, the first mode returned by the count order is used.")
+    people_view = people_df.rename(columns={
+        "person_name": "Person",
+        "achievement_count": "Achievement Count",
+        "main_activity": "Most Frequent Activity",
+    })
+    st.dataframe(people_view, use_container_width=True, hide_index=True)
     if not people_df.empty:
         st.plotly_chart(px.bar(people_df.head(10), x="achievement_count", y="person_name", orientation="h"), use_container_width=True)
 
@@ -278,11 +309,10 @@ with tab_studio:
             st.session_state["slide_spec"] = slide_spec
             st.session_state.pop("ppt_bytes", None)
 
-        slide_options = {int(slide["id"]): f"{slide['id']}. {slide['title']}" for slide in slide_spec["slides"]}
-        selected_slide_id = st.selectbox("Preview / edit slide", list(slide_options), format_func=lambda slide_id: slide_options[slide_id])
+        selected_slide_id = int(st.session_state["preview_slide_id"])
         selected_slide = get_slide(slide_spec, selected_slide_id)
 
-        st.markdown("**Current Slide Controls**")
+        st.markdown(f"**Current Slide Controls: Slide {selected_slide_id}**")
         selected_slide["title"] = st.text_input("Slide title", value=selected_slide.get("title", ""), key=f"title_{selected_slide_id}")
         selected_slide["layout_variant"] = st.selectbox(
             "Layout variant",
@@ -338,7 +368,8 @@ with tab_studio:
         if st.session_state.get("pending_slide_patch_warning"):
             st.warning(st.session_state["pending_slide_patch_warning"])
         if st.session_state.get("pending_slide_patch"):
-            st.json(st.session_state["pending_slide_patch"])
+            st.markdown("**Proposed changes**")
+            st.dataframe(_describe_patch(st.session_state["pending_slide_patch"]), use_container_width=True, hide_index=True)
             apply_col, discard_col = st.columns(2)
             with apply_col:
                 if st.button("Apply patch"):
@@ -356,17 +387,36 @@ with tab_studio:
                     st.session_state.pop("pending_slide_patch_warning", None)
                     st.rerun()
 
-        with st.expander("Current SlideSpec JSON"):
-            st.code(json.dumps(slide_spec, ensure_ascii=False, indent=2), language="json")
-
-        with st.expander("Calculated metrics available to AI"):
-            st.json(compact_metrics_for_ai(metrics))
+        with st.expander("Audit trail summary"):
+            st.dataframe(
+                pd.DataFrame([
+                    {"Item": "AI provider", "Value": selected_provider},
+                    {"Item": "Style preset", "Value": slide_spec.get("style_preset", "atlas")},
+                    {"Item": "Editing slide", "Value": selected_slide_id},
+                    {"Item": "Data source", "Value": selected_slide.get("data_source", "")},
+                    {"Item": "Fields", "Value": ", ".join(selected_slide.get("fields", []))},
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with preview_col:
         st.markdown("**HTML Slide Preview**")
-        view_mode = st.radio("Preview mode", ["Selected slide", "Full deck thumbnails"], horizontal=True)
+        nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+        with nav_left:
+            if st.button("‹ Previous", disabled=selected_slide_id <= 1, use_container_width=True):
+                st.session_state["preview_slide_id"] = selected_slide_id - 1
+                st.rerun()
+        with nav_mid:
+            st.markdown(f"<div style='text-align:center;font-weight:700;padding:.5rem 0;'>Slide {selected_slide_id} of 8</div>", unsafe_allow_html=True)
+        with nav_right:
+            if st.button("Next ›", disabled=selected_slide_id >= 8, use_container_width=True):
+                st.session_state["preview_slide_id"] = selected_slide_id + 1
+                st.rerun()
+
+        view_mode = st.radio("Preview mode", ["Selected slide", "Full deck thumbnails"], horizontal=True, label_visibility="collapsed")
         if view_mode == "Selected slide":
-            components.html(render_slide_preview_html(slide_spec, selected_slide_id, data_context), height=620, scrolling=False)
+            components.html(render_slide_preview_html(slide_spec, selected_slide_id, data_context), height=650, scrolling=False)
         else:
             components.html(render_deck_preview_html(slide_spec, data_context), height=1100, scrolling=True)
 
@@ -379,17 +429,6 @@ with tab_report:
 
     current_slide_signature = slide_spec_signature(st.session_state["slide_spec"])
     build_signature = f"{context_signature}|slide_spec={current_slide_signature}"
-
-    with st.expander("Traceability metadata for this build"):
-        st.json({
-            "template_version": TEMPLATE_VERSION,
-            "ai_provider": st.session_state.get("narrative_provider", "rule_based"),
-            "ai_model": st.session_state.get("narrative_model", "rules-v1"),
-            "style_preset": st.session_state["slide_spec"].get("style_preset", "atlas"),
-            "filters": filter_trace,
-        })
-
-    components.html(render_slide_preview_html(st.session_state["slide_spec"], 1, data_context), height=540, scrolling=False)
 
     if st.button("Build editable PPTX from current SlideSpec", type="primary"):
         generated_at = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -450,15 +489,18 @@ with tab_report:
 
     with st.expander("Report history"):
         history = load_report_history(REPORT_HISTORY_CSV)
-        st.dataframe(history.tail(10), use_container_width=True, hide_index=True)
-
-with st.expander("Data quality checks"):
-    checks = {
-        "Rows loaded": len(df),
-        "Rows after filters": len(filtered),
-        "Missing delivery date": int(df["delivery_date"].isna().sum()),
-        "Missing Study ID": int(df["study_id"].eq("").sum()),
-        "Missing comments": int(df["comments"].eq("").sum()),
-        "Missing submitted by": int(df["submitted_by"].eq("").sum()),
-    }
-    st.json(checks)
+        visible_history_cols = [
+            col for col in [
+                "generated_at",
+                "report_title",
+                "template_version",
+                "ai_provider",
+                "ai_model",
+                "style_preset",
+                "rows_loaded",
+                "rows_filtered",
+                "period_label",
+                "preview_renderer",
+            ] if col in history.columns
+        ]
+        st.dataframe(history[visible_history_cols].tail(10), use_container_width=True, hide_index=True)

@@ -97,7 +97,7 @@ DATA_SOURCE_FIELDS = {
     "category_breakdown": ["Category", "Count"],
     "impact_breakdown": ["Impact", "Count"],
     "study_highlights": ["Study ID", "TA", "Achievements", "Top Activity", "High Impact", "CF Total", "Latest Delivery"],
-    "people_summary": ["Person", "Achievement Count", "Main Activity"],
+    "people_summary": ["Person", "Achievement Count", "Most Frequent Activity"],
     "quality_highlights": ["Delivery", "Study ID", "Activity", "Category", "Impact", "CF Total", "Comments"],
     "appendix": [
         "delivery_date",
@@ -210,7 +210,7 @@ def build_default_slide_spec(
                 "subtitle": period_label,
                 "kind": "people",
                 "data_source": "people_summary",
-                "fields": ["Person", "Achievement Count", "Main Activity"],
+                "fields": ["Person", "Achievement Count", "Most Frequent Activity"],
                 "top_n": 12,
                 "sort_by": "Achievement Count",
                 "chart_type": "bar",
@@ -385,7 +385,7 @@ def get_data_frame_for_slide(slide: dict[str, Any], df: pd.DataFrame, metrics: d
         people_df = build_people_summary(df)
         if not people_df.empty:
             people_df = people_df[["person_name", "achievement_count", "main_activity"]].copy()
-            people_df.columns = ["Person", "Achievement Count", "Main Activity"]
+            people_df.columns = ["Person", "Achievement Count", "Most Frequent Activity"]
         table = people_df
     elif data_source == "quality_highlights":
         table = build_quality_complexity_highlights(df, limit=max(top_n, 1))
