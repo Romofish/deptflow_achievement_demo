@@ -17,8 +17,9 @@ This demo turns a SharePoint-exported achievement CSV into a filterable dashboar
   - Impact Level
 - Shows dashboard metrics and charts.
 - Builds a review table for human validation.
-- Generates a fixed-template PPTX report.
-- Includes a rule-based executive summary draft.
+- Generates an 8-slide fixed-template PPTX report from filtered data only.
+- Includes an editable AI Narrative Assistant with rule-based fallback.
+- Records report generation traceability in `outputs/report_history.csv`.
 
 ## Folder structure
 
@@ -29,6 +30,8 @@ This demo turns a SharePoint-exported achievement CSV into a filterable dashboar
   README.md
   /src
     data_utils.py
+    metrics_utils.py
+    ai_utils.py
     ppt_utils.py
   /sample_data
     local CSV exports, ignored by Git
@@ -56,7 +59,15 @@ streamlit run app.py
 
 If the bundled sample CSV is not present, upload a SharePoint achievement CSV in the sidebar. PPTX export works from the uploaded and filtered data.
 
-For future AI features, copy `.env.example` to `.env` and fill local-only settings such as `OPENAI_API_KEY`. The real `.env` file is intentionally not committed.
+For AI provider usage, copy `.env.example` to `.env` and fill local-only settings such as `OPENAI_API_KEY` or `GEMINI_API_KEY`. The real `.env` file is intentionally not committed.
+
+AI narrative generation is optional:
+
+- `AI_PROVIDER=rule_based` works without API keys.
+- `AI_PROVIDER=openai` uses OpenAI only when `OPENAI_API_KEY` is present.
+- `AI_PROVIDER=gemini` uses Gemini only when `GEMINI_API_KEY` is present.
+
+AI output is editable narrative text only. Counts, filters, and PPT tables/charts are calculated by the application from the filtered source data.
 
 ## Recommended next step
 
