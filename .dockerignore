@@ -1,0 +1,44 @@
+# Keep the build context tiny and free of secrets / generated artefacts.
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+outputs/
+sample_data/
+*.pptx
+*.xlsx
+*.xls
+*.csv
+
+# VCS / editors / OS
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs and CI artefacts not needed at runtime
+*.md
+!README.md
+!Agent.md
+Dockerfile
+.dockerignore

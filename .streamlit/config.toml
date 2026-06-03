@@ -1,0 +1,23 @@
+# Streamlit server config baked into the container image.
+# Env vars (STREAMLIT_*) in the Dockerfile take precedence and let OpenShift
+# override behaviour without rebuilding.
+
+[server]
+port = 8080
+address = "0.0.0.0"
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+# Streamlit needs a writable folder for its file uploader staging area.
+# /opt/app-root/src is group-writable in the image, so this works under
+# OpenShift's arbitrary UID.
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#0460A9"          # Novartis-ish blue; tweak to brand guideline
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6F8"
+textColor = "#1F2933"
